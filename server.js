@@ -2,11 +2,11 @@ import express from "express";
 import dotenv from "dotenv";
 import fs from "fs";
 import mammoth from "mammoth";
-import OpenAI from "openai";
-import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
-import { ElevenLabsClient, play } from '@elevenlabs/elevenlabs-js';
+import multer from "multer";
+import OpenAI from "openai";
+import { ElevenLabsClient, play } from "@elevenlabs/elevenlabs-js";
 
 dotenv.config();
 
@@ -18,7 +18,7 @@ app.use(express.json());
 app.use(express.static("public"));
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const SISTEMA = process.env.SYSTEM_PROMPT;
+const SISTEMA = process.env.SYSTEM_PROMPT || "Eres un asistente conversacional que responde por voz.";
 
 // --- Embeddings de documentos ---
 let baseVectores = [];
@@ -84,8 +84,9 @@ function esConversacionDeDocumento(pregunta) {
   return PALABRAS_DOCUMENTOS.some(p => texto.includes(p));
 }
 
+// --- Funciones rápidas ---
 const funciones = [
-  { nombre: "saluda", palabras: ["saludame", "hola"], ejecutar: () => "Hola Pablo, encantado de saludarte." },
+  { nombre: "saluda", palabras: ["saludame", "hola"], ejecutar: () => "Hola, encantado de saludarte." },
   { nombre: "tiempo", palabras: ["tiempo", "clima"], ejecutar: () => "El tiempo en Badajoz es soleado con 25°C." }
 ];
 
@@ -94,91 +95,6 @@ function detectarFuncion(mensaje) {
   return funciones.find(fn => fn.palabras.some(p => texto.includes(p)));
 }
 
-// --- Chat endpoint con SSE y ElevenLabs ---
-app.post("/api/chat", async (req, res) => {
-  const { messages = [] } = req.body;
-  const ultimoMensaje = messages.filter(m => m.role === "user").slice(-1)[0]?.content || "";
-
-  try {
-    const fn = detectarFuncion(ultimoMensaje);
-    if (fn) {
-      const respuesta = fn.ejecutar();
-      // Convertir a voz con ElevenLabs
-      const elevenlabs = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
-      const audio = await elevenlabs.textToSpeech.convert('JBFqnCBsd6RMkjVDRZzb', {
-        text: respuesta,
-        modelId: 'eleven_multilingual_v2',
-        outputFormat: 'mp3_44100_128',
-      });
-      await play(audio);
-      return res.json({ text: respuesta });
-    }
-
-    let contexto = "";
-    if (esConversacionDeDocumento(ultimoMensaje) && baseVectores.length > 0) {
-      const qEmbedding = await client.embeddings.create({
-        model: "text-embedding-3-small",
-        input: ultimoMensaje,
-      });
-      const queryVector = qEmbedding.data[0].embedding;
-      const puntuados = baseVectores.map(c => ({
-        ...c,
-        score: similitudCoseno(queryVector, c.embedding),
-      }));
-      const mejores = puntuados.sort((a, b) => b.score - a.score).slice(0, 3);
-      contexto = mejores.map(c => c.texto).join("\n");
-    }
-
-    const mensajesEntrada = [
-      { role: "system", content: SISTEMA },
-      ...messages.map(m => ({ role: m.role, content: m.content })),
-    ];
-    if (contexto) mensajesEntrada.push({ role: "system", content: `Información de documentos:\n${contexto}` });
-
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders && res.flushHeaders();
-
-    const stream = await client.responses.stream({
-      model: "gpt-4o-mini",
-      input: mensajesEntrada
-    });
-
-    let respuestaCompleta = "";
-
-    for await (const evento of stream) {
-      if (evento.type === "response.output_text.delta" || evento.type === "response.refusal.delta") {
-        const texto = String(evento.delta || "").replace(/\r/g, "");
-        if (!texto) continue;
-        respuestaCompleta += texto;
-        res.write(`data: ${texto}\n\n`);
-      } else if (evento.type === "response.error") {
-        const errMsg = evento.error?.message || "Error interno en el stream";
-        res.write(`data: ${errMsg}\n\n`);
-      }
-    }
-
-    // Reproducir audio de la respuesta completa
-    const elevenlabs = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
-    const audio = await elevenlabs.textToSpeech.convert('JBFqnCBsd6RMkjVDRZzb', {
-      text: respuestaCompleta,
-      modelId: 'eleven_multilingual_v2',
-      outputFormat: 'mp3_44100_128',
-    });
-    await play(audio);
-
-    res.write("data: [DONE]\n\n");
-    res.end();
-
-  } catch (err) {
-    if (!res.headersSent) res.status(500).json({ error: err.message });
-    else {
-      try { res.write(`data: Error: ${err.message}\n\n`); res.write("data: [DONE]\n\n"); res.end(); } catch {}
-    }
-  }
-});
-
 // --- Audio endpoint ---
 const upload = multer({ dest: path.join(__dirname, "uploads/") });
 
@@ -186,8 +102,7 @@ app.post("/api/voz", upload.single("audio"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Archivo de audio requerido" });
 
   try {
-    const ext = path.extname(req.file.originalname) || ".webm";
-    const tempPath = req.file.path + ext;
+    const tempPath = req.file.path + ".webm";
     fs.renameSync(req.file.path, tempPath);
 
     const transcription = await client.audio.transcriptions.create({
@@ -195,13 +110,63 @@ app.post("/api/voz", upload.single("audio"), async (req, res) => {
       model: "gpt-4o-mini-transcribe",
     });
 
-    res.json({ text: transcription.text });
+    const pregunta = transcription.text;
+    console.log("Usuario dijo:", pregunta);
 
+    // --- Funciones rápidas ---
+    const fn = detectarFuncion(pregunta);
+    let respuestaTexto = "";
+    if (fn) {
+      respuestaTexto = fn.ejecutar();
+    } else {
+      // --- Contexto documentos ---
+      let contexto = "";
+      if (esConversacionDeDocumento(pregunta) && baseVectores.length > 0) {
+        const qEmbedding = await client.embeddings.create({
+          model: "text-embedding-3-small",
+          input: pregunta,
+        });
+        const queryVector = qEmbedding.data[0].embedding;
+        const puntuados = baseVectores.map(c => ({
+          ...c,
+          score: similitudCoseno(queryVector, c.embedding),
+        }));
+        const mejores = puntuados.sort((a, b) => b.score - a.score).slice(0, 3);
+        contexto = mejores.map(c => c.texto).join("\n");
+      }
+
+      const mensajesEntrada = [
+        { role: "system", content: SISTEMA },
+        ...(contexto ? [{ role: "system", content: `Información de documentos:\n${contexto}` }] : []),
+        { role: "user", content: pregunta }
+      ];
+
+      const respuesta = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: mensajesEntrada,
+      });
+
+      respuestaTexto = respuesta.choices[0].message.content;
+    }
+
+    console.log("IA responde:", respuestaTexto);
+
+    // --- Reproducir respuesta ---
+    const elevenlabs = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
+    const audio = await elevenlabs.textToSpeech.convert('JBFqnCBsd6RMkjVDRZzb', {
+      text: respuestaTexto,
+      modelId: 'eleven_multilingual_v2',
+      outputFormat: 'mp3_44100_128',
+    });
+    await play(audio);
+
+    res.json({ text: respuestaTexto });
     fs.unlinkSync(tempPath);
+
   } catch (err) {
+    console.error("Error procesando audio:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Servidor ---
 app.listen(3000, () => console.log("Servidor activo en http://localhost:3000"));

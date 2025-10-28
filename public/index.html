@@ -2,18 +2,22 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <title>Mini ChatGPT</title>
+    <title>Asistente de voz IA</title>
     <link rel="stylesheet" href="index.css">
   </head>
   <body>
-    <h3>IA generadora de texto</h3>
-    <div class="input-container">
-      <input type="text" id="chati" placeholder="Escribe algo..." />
-      <button id="mic" title="Hablar">🎤</button>
-      <button id="enviar">ENVIAR</button>
+    <div class="contenedor">
+      <h2>FLORENZIA</h2>
+      <div class="panel">
+        <button id="mic" title="Hablar"><img src="microfono.png" alt="Micrófono"></button>
+        <button id="enviar">Enviar</button>
+      </div>
+      <p id="estado">Presiona el micrófono para hablar</p>
     </div>
-    <div id="respuesta"></div>
+
+    <input type="text" id="chati" disabled hidden />
 
     <script src="index.js"></script>
   </body>
 </html>
+</h2>
